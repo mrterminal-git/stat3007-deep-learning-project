@@ -3,7 +3,7 @@ import torch.nn as nn
 
 
 class CNN(nn.Module):
-    def __init__(self, input_length, num_features, num_classes=2):
+    def __init__(self, input_length, num_features, num_filters= 8, num_classes=2, filter_size=2):
         """
         Initialize the CNN model based on the equations in the paper.
         
@@ -14,35 +14,35 @@ class CNN(nn.Module):
         """
         super(CNN, self).__init__()
         
-        self.D = 8  # Number of filters (D = 8 according to equation)
-        self.D_size = 2  # Filter size (D_size = 2 according to equation)
+        self.num_filters = num_filters  # Number of filters (D = 8 according to equation)
+        self.filter_size = filter_size  # Filter size (filter_size = 2 according to equation)
         
         # First convolutional layer (Equation 3)
         # Input shape: [batch_size, num_features, input_length]
         self.conv1 = nn.Conv1d(
             in_channels=num_features,
-            out_channels=self.D,
-            kernel_size=self.D_size,
+            out_channels=self.num_filters,
+            kernel_size=self.filter_size,
             stride=1,
             padding=0
         )
         
         # Second convolutional layer (Equation 4)
         self.conv2 = nn.Conv1d(
-            in_channels=self.D,
-            out_channels=self.D,
-            kernel_size=self.D_size,
+            in_channels=self.num_filters,
+            out_channels=self.num_filters,
+            kernel_size=self.filter_size,
             stride=1,
             padding=0
         )
         
         # Calculate output sizes after convolutions
-        L_after_conv1 = input_length - self.D_size + 1
-        L_after_conv2 = L_after_conv1 - self.D_size + 1
+        L_after_conv1 = input_length - self.filter_size + 1
+        L_after_conv2 = L_after_conv1 - self.filter_size + 1
         
         # Fully connected layers
         self.flatten = nn.Flatten()
-        self.fc = nn.Linear(self.D * L_after_conv2, num_classes)
+        self.fc = nn.Linear(self.num_filters * L_after_conv2, num_classes)
         
         # Activation
         self.relu = nn.ReLU()
