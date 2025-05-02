@@ -1,5 +1,6 @@
 import pandas as pd
 from io import StringIO
+from typing import Optional, List
 
 class DataLoader:
     """
@@ -82,6 +83,68 @@ class DataLoader:
 
         return filtered_data.copy() # Return a copy to avoid SettingWithCopyWarning
 
+    def get_all_data(self):
+        """
+        Returns the entire dataset.
+
+        Returns:
+            pandas.DataFrame: The entire dataset.
+        """
+        if self.data is None:
+            print("Error: Data not loaded.")
+            return None
+        return self.data.copy()
+
+    def get_country_list(self):
+        """
+        Returns a list of unique countries in the dataset.
+
+        Returns:
+            list: A list of unique country names.
+        """
+        if self.data is None:
+            print("Error: Data not loaded.")
+            return None
+        return self.data['Country'].unique().tolist()
+    
+    def get_price_matrix(
+        self,
+        time_range: str,
+        countries: List[str],
+        fill_method: Optional[str] = None
+    ) -> pd.DataFrame:
+        """
+        Returns a price matrix where:
+        - Rows = dates
+        - Columns = countries
+        - Values = daily electricity prices
+
+        Parameters:
+        - time_range (str): e.g. "2021-05-10,2021-05-16"
+        - countries (List[str]): list of country names to include
+        - fill_method (Optional[str]): 'ffill', 'bfill', or None
+
+        Returns:
+        - pd.DataFrame: index=date, columns=country names, values=prices
+        """
+        start_date, end_date = time_range.split(",")
+
+        # Filter the master data once
+        df = self.data.copy()
+        df = df[df["Country"].isin(countries)]
+        df = df[(df["Date"] >= start_date) & (df["Date"] <= end_date)]
+
+        # Pivot: index=date, columns=country, values=price
+        price_matrix = df.pivot(index="Date", columns="Country", values="Price").sort_index()
+
+        # Handle missing data
+        if fill_method:
+            price_matrix = price_matrix.fillna(method=fill_method)
+        else:
+            price_matrix = price_matrix.dropna()
+
+        return price_matrix
+    
 # Example usage
 
 parser = DataLoader()
@@ -99,3 +162,20 @@ print(f"Shape: {france_week.shape}")
 # Example 3: Country not found
 print("\n--- Country Not Found Example ---")
 non_existent = parser.get_data_by_country_and_range("Atlantis", "2020-01-01,2020-12-31")
+# Example 4: Get all data
+all_data = parser.get_all_data()
+# Example 5: Get a list of all countries inside the dataset
+all_countries = parser.get_country_list()
+print("\n--- All Countries ---")
+print(all_countries)
+# Example 6: Get a (country, price) matrix for a specific time range (ready for CointegrationResidualGenerator)
+price_matrix = parser.get_price_matrix("2021-05-10,2021-05-16", ["Germany", "France"])
+print("\n--- Price Matrix ---")
+print(price_matrix)
+print(f"Shape: {price_matrix.shape}")
+
+
+# Get list of countries
+print("\n--- List of Countries ---")
+countries = parser.get_country_list()
+print(countries)
