@@ -2,9 +2,9 @@ import torch
 import torch.nn as nn # building blocks for neural networks
 import torch.nn.functional as F # access to functions like ReLU, sigmoid, etc.
 
-class FNN(nn.Module):
+class FFN(nn.Module):
     def __init__(self, input_dim, hidden_dim=32):
-        super(FNN, self).__init__()
+        super(FFN, self).__init__()
         self.fc1 = nn.Linear(input_dim, hidden_dim)
         self.fc2 = nn.Linear(hidden_dim, hidden_dim)
         self.out = nn.Linear(hidden_dim, 1)
