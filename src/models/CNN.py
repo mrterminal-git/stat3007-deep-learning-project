@@ -1,7 +1,5 @@
 import torch
 import torch.nn as nn
-
-
 class CNN(nn.Module):
     def __init__(self, input_length, num_features, num_filters= 8, num_classes=2, filter_size=2):
         """
