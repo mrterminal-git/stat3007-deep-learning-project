@@ -132,7 +132,7 @@ class PortfolioOptimizer:
         sharpe_ratio = mean_excess / std_excess
         return -sharpe_ratio
 
-    def train(self):
+    def train(self, verbose=False):
         """
         Train the CNN+FFN model to maximize the Sharpe ratio.
 
@@ -173,8 +173,7 @@ class PortfolioOptimizer:
                 loss.backward()
                 self.optimizer.step()
 
-            
-            if epoch % 10 == 0:
+            if epoch % 10 == 0 and verbose:
                 # Evaluate Sharpe ratio for every 10th epoch
                 sharpe = self._evaluate_epoch()
                 print(f"Epoch {epoch}, Sharpe Ratio: {sharpe:.4f}")
@@ -183,7 +182,7 @@ class PortfolioOptimizer:
         final_sharpe, portfolio_returns = self.evaluate_final()
         print(f"\nFinal Sharpe Ratio: {final_sharpe:.4f}")
 
-        return portfolio_returns
+        return final_sharpe, portfolio_returns
 
     def _evaluate_epoch(self):
         """

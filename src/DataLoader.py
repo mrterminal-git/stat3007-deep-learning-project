@@ -7,7 +7,7 @@ class DataLoader:
     Parses European wholesale electricity price data, allowing filtering
     by country and date range.
     """
-    def __init__(self, file_path="./data/european_wholesale_electricity_price_data_daily.csv"):
+    def __init__(self, file_path="../data/european_wholesale_electricity_price_data_daily.csv"):
         """
         Initializes the parser and loads the data.
 
