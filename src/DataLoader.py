@@ -28,6 +28,7 @@ class DataLoader:
             # Rename price column for easier access
             df.rename(columns={'Price (EUR/MWhe)': 'Price'}, inplace=True)
             print(f"Data loaded successfully from {self.file_path}")
+            
             return df
         except FileNotFoundError:
             print(f"Error: File not found at {self.file_path}")
@@ -145,7 +146,6 @@ class DataLoader:
 
         return price_matrix
     
-# Example usage
 
 parser = DataLoader()
 # Example 1: Get data for Germany in 2020
