@@ -14,7 +14,7 @@ class FFN(nn.Module):
         """
         super(FFN, self).__init__()
         self.fc1 = nn.Linear(input_dim, hidden_dim)
-        self.dropout = nn.Dropout(0.5)
+        #self.dropout = nn.Dropout(0.5)
         self.fc2 = nn.Linear(hidden_dim, hidden_dim)
         self.out = nn.Linear(hidden_dim, output_dim)
 
@@ -29,9 +29,9 @@ class FFN(nn.Module):
             torch.Tensor: Output tensor of shape [batch_size, output_dim]
         """
         x = F.relu(self.fc1(x))
-        x = self.dropout(x)
+        #x = self.dropout(x)
         x = F.relu(self.fc2(x))
-        x = self.dropout(x)
+        #x = self.dropout(x)
         w_eps = self.out(x)  # Shape: [batch_size, output_dim]
         return w_eps
     
