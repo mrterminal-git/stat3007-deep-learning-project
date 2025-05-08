@@ -11,14 +11,16 @@ class PortfolioOptimizer:
     A class to train and evaluate a CNN+FFN model for portfolio optimization,
     generating weights to maximize the Sharpe ratio based on electricity price residuals.
     """
-    def __init__(self, cnn_input_array: np.array, next_day_returns: pd.DataFrame, device=None, num_filters=8, filter_size=2, hidden_dim=32,
+    def __init__(self, train_dataset: np.array, train_next_day_returns: pd.DataFrame, val_dataset: np.array, val_next_day_returns: pd.DataFrame, device=None, num_filters=8, filter_size=2, hidden_dim=32,
                  lr=0.001, num_epochs=1000, batch_size=32):
         """
         Initialize the portfolio optimizer with input data and hyperparameters.
 
         Args:
-            cnn_input_array (np.ndarray): Input residuals with shape [samples, num_countries, window_size].
-            next_day_returns (pd.DataFrame): Next-day returns with shape [samples, num_countries].
+            train_dataset (np.ndarray): Input residuals for training with shape [samples, num_countries, window_size].
+            train_next_day_returns (pd.DataFrame): Next-day returns for training with shape [samples, num_countries].
+            val_dataset (np.ndarray): Input residuals for validation with shape [samples, num_countries, window_size].
+            val_next_day_returns (pd.DataFrame): Next-day returns for validation with shape [samples, num_countries].
             device (torch.device, optional): Device for computation (cuda, mps, or cpu). Defaults to auto-detection.
             num_filters (int): Number of CNN filters.
             filter_size (int): Size of CNN convolutional filters.
@@ -38,9 +40,9 @@ class PortfolioOptimizer:
         self.device = device
 
         # Data dimensions
-        self.num_countries = cnn_input_array.shape[1]  # Number of countries (31)
-        self.window_size = cnn_input_array.shape[2]    # Window size for residuals (30)
-        self.num_samples = cnn_input_array.shape[0]    # Number of samples (329, or the number of days)
+        self.num_countries = train_dataset.shape[1]  # Number of countries (31)
+        self.window_size = train_dataset.shape[2]    # Window size for residuals (30)
+        self.num_samples = train_dataset.shape[0]    # Number of samples (329, or the number of days)
 
         # Hyperparameters
         self.num_filters = num_filters
@@ -51,8 +53,12 @@ class PortfolioOptimizer:
         self.batch_size = batch_size
 
         # Convert input data to PyTorch tensors
-        self.cnn_input_tensor = torch.FloatTensor(cnn_input_array).to(self.device)
-        self.next_day_returns_tensor = torch.FloatTensor(next_day_returns.values).to(self.device)
+        self.cnn_input_tensor = torch.FloatTensor(train_dataset).to(self.device)
+        self.next_day_returns_tensor = torch.FloatTensor(train_next_day_returns.values).to(self.device)
+
+        # Validation data
+        self.val_cnn_input_tensor = torch.FloatTensor(val_dataset).to(self.device)
+        self.val_next_day_returns_tensor = torch.FloatTensor(val_next_day_returns.values).to(self.device)
 
         # Initialize models
         self.cnn_model = self._initialize_cnn()
@@ -136,7 +142,11 @@ class PortfolioOptimizer:
         """
         Train the CNN+FFN model to maximize the Sharpe ratio.
 
+        Args:
+            verbose (bool): If True, print training progress.
+
         Returns:
+            float: Final Sharpe ratio after training.
             list: Portfolio returns from the final evaluation.
         """
         for epoch in range(self.num_epochs):
@@ -176,11 +186,11 @@ class PortfolioOptimizer:
             if epoch % 10 == 0 and verbose:
                 # Evaluate Sharpe ratio for every 10th epoch
                 sharpe = self._evaluate_epoch()
-                print(f"Epoch {epoch}, Sharpe Ratio: {sharpe:.4f}")
+                print(f"Epoch {epoch}, Sharpe Ratio on Training set: {sharpe:.4f}")
 
         # Perform final evaluation
         final_sharpe, portfolio_returns = self.evaluate_final()
-        print(f"\nFinal Sharpe Ratio: {final_sharpe:.4f}")
+        print(f"\nFinal Sharpe Ratio on Validation Set: {final_sharpe:.4f}")
 
         return final_sharpe, portfolio_returns
 
@@ -196,10 +206,10 @@ class PortfolioOptimizer:
         self.FFN_model.eval()
 
         with torch.no_grad():
-            for i in range(0, len(self.cnn_input_tensor), self.batch_size):
-                batch_end = min(i + self.batch_size, len(self.cnn_input_tensor))
-                batch_inputs = self.cnn_input_tensor[i:batch_end]
-                batch_returns = self.next_day_returns_tensor[i:batch_end]
+            for i in range(0, len(self.val_cnn_input_tensor), self.batch_size):
+                batch_end = min(i + self.batch_size, len(self.val_cnn_input_tensor))
+                batch_inputs = self.val_cnn_input_tensor[i:batch_end]
+                batch_returns = self.val_next_day_returns_tensor[i:batch_end]
 
                 # Forward pass
                 cnn_output = self.cnn_model(batch_inputs)
@@ -228,9 +238,9 @@ class PortfolioOptimizer:
         self.FFN_model.eval()
 
         with torch.no_grad():
-            for i in range(len(self.cnn_input_tensor)):
-                inputs = self.cnn_input_tensor[i:i+1]  # Shape: [1, num_countries, window_size]
-                returns = self.next_day_returns_tensor[i:i+1]  # Shape: [1, num_countries]
+            for i in range(len(self.val_cnn_input_tensor)):
+                inputs = self.val_cnn_input_tensor[i:i+1]  # Shape: [1, num_countries, window_size]
+                returns = self.val_next_day_returns_tensor[i:i+1]  # Shape: [1, num_countries]
 
                 # Forward pass
                 cnn_output = self.cnn_model(inputs)
@@ -241,5 +251,39 @@ class PortfolioOptimizer:
                 portfolio_return = torch.sum(normalized_weights * returns, dim=1).item()
                 self.evaluator.add_return(portfolio_return)
 
+        final_sharpe = self.evaluator.calculate_sharpe()
+        return final_sharpe, self.evaluator.portfolio_returns
+    
+    def test_model(self, test_dataset: np.array, test_next_day_returns: pd.DataFrame):
+        """
+        Test the trained model on a new dataset.
+
+        Args:
+            test_dataset (np.ndarray): Input residuals for testing with shape [samples, num_countries, window_size].
+            test_next_day_returns (pd.DataFrame): Next-day returns for testing with shape [samples, num_countries].
+
+        Returns:
+            tuple: (Sharpe ratio, list of portfolio returns).
+        """
+        self.cnn_model.eval()
+        self.FFN_model.eval()
+
+        # Convert test data to PyTorch tensors
+        test_cnn_input_tensor = torch.FloatTensor(test_dataset).to(self.device)
+        test_next_day_returns_tensor = torch.FloatTensor(test_next_day_returns.values).to(self.device)
+
+        # Evaluate the model on the test dataset
+        self.evaluator.reset()
+        with torch.no_grad():
+            for i in range(len(test_cnn_input_tensor)):
+                inputs = test_cnn_input_tensor[i:i+1]
+                returns = test_next_day_returns_tensor[i:i+1]
+                # Forward pass
+                cnn_output = self.cnn_model(inputs)
+                weights = self.FFN_model(cnn_output)
+                normalized_weights = self.soft_normalize(weights)
+                # Compute portfolio return
+                portfolio_return = torch.sum(normalized_weights * returns, dim=1).item()
+                self.evaluator.add_return(portfolio_return)
         final_sharpe = self.evaluator.calculate_sharpe()
         return final_sharpe, self.evaluator.portfolio_returns
