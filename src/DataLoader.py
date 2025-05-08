@@ -147,89 +147,94 @@ class DataLoader:
         return price_matrix
     
 
-        def get_price_matrix_rolling_window(
-            self,
-            one_window_days: int,
-            window_stride_days: int,
-            time_range: str,
-            countries: List[str],
-            fill_method: Optional[str] = None
-        ) -> List[pd.DataFrame]:
-            """
-            Returns a set of price matrices where:
-            - Rows = dates
-            - Columns = countries
-            - Values = daily electricity prices
+    def get_price_matrix_rolling_window(
+        self,
+        one_window_days: int,
+        window_stride_days: int,
+        time_range: str,
+        countries: List[str],
+        fill_method: Optional[str] = None
+    ) -> List[pd.DataFrame]:
+        """
+        Returns a set of price matrices where:
+        - Rows = dates
+        - Columns = countries
+        - Values = daily electricity prices
 
-            Parameters:
-            - one_window_days (int): number of days in one window
-            - window_stride_days (int): number of days to stride the window
-            - time_range (str): e.g. "2021-05-10,2021-05-16"
-            - countries (List[str]): list of country names to include
-            - fill_method (Optional[str]): 'ffill', 'bfill', or None
+        Parameters:
+        - one_window_days (int): number of days in one window
+        - window_stride_days (int): number of days to stride the window
+        - time_range (str): e.g. "2021-05-10,2021-05-16"
+        - countries (List[str]): list of country names to include
+        - fill_method (Optional[str]): 'ffill', 'bfill', or None
 
-            Returns:
-            - List[pd.DataFrame]: A list of price matrices, each representing a rolling window.
-            """
-            start_date, end_date = time_range.split(",")
+        Returns:
+        - List[pd.DataFrame]: A list of price matrices, each representing a rolling window.
+        """
+        start_date, end_date = time_range.split(",")
 
-            # Filter the master data once
-            df = self.data.copy()
-            df = df[df["Country"].isin(countries)]
-            df = df[(df["Date"] >= start_date) & (df["Date"] <= end_date)]
+        # Filter the master data once
+        df = self.data.copy()
+        df = df[df["Country"].isin(countries)]
+        df = df[(df["Date"] >= start_date) & (df["Date"] <= end_date)]
 
-            # Pivot: index=date, columns=country, values=price
-            price_matrix = df.pivot(index="Date", columns="Country", values="Price").sort_index()
+        # Pivot: index=date, columns=country, values=price
+        price_matrix = df.pivot(index="Date", columns="Country", values="Price").sort_index()
 
-            # Handle missing data
-            if fill_method:
-                price_matrix = price_matrix.fillna(method=fill_method)
-            else:
-                price_matrix = price_matrix.dropna()
+        # Handle missing data
+        if fill_method:
+            price_matrix = price_matrix.fillna(method=fill_method)
+        else:
+            price_matrix = price_matrix.dropna()
 
-            # Generate rolling windows
-            rolling_windows = []
-            for start_idx in range(0, len(price_matrix) - one_window_days + 1, window_stride_days):
-                end_idx = start_idx + one_window_days
-                if end_idx > len(price_matrix):  # Ensure we don't go past the date range
-                    break
-                rolling_window = price_matrix.iloc[start_idx:end_idx]
-                rolling_windows.append(rolling_window)
+        # Generate rolling windows
+        rolling_windows = []
+        for start_idx in range(0, len(price_matrix) - one_window_days + 1, window_stride_days):
+            end_idx = start_idx + one_window_days
+            if end_idx > len(price_matrix):  # Ensure we don't go past the date range
+                break
+            rolling_window = price_matrix.iloc[start_idx:end_idx]
+            rolling_windows.append(rolling_window)
 
-            return rolling_windows
-            
+        return rolling_windows
     
+    def get_next_day_returns(
+        self,
+        rolling_windows: List[pd.DataFrame],
+        price_matrix: pd.DataFrame
+    ) -> List[pd.Series]:
+        """
+        Finds the next-day return for the last day in each rolling window.
 
-# parser = DataLoader()
-# # Example 1: Get data for Germany in 2020
-# germany_2020 = parser.get_data_by_country_and_range("2020-01-01,2020-12-31")
+        Parameters:
+        - rolling_windows (List[pd.DataFrame]): A list of price matrices, each representing a rolling window.
+        - price_matrix (pd.DataFrame): A DataFrame of daily prices (index=date, columns=country names).
 
-# print("\n--- Germany 2020 Data ---")
-# print(germany_2020.head(20))
-# print(f"Shape: {germany_2020.shape}")
-# # Example 2: Get data for France for a specific week
-# france_week = parser.get_data_by_country_and_range("2021-05-10,2021-05-16","France")
-# print("\n--- France May 2021 Week Data ---")
-# print(france_week)
-# print(f"Shape: {france_week.shape}")
-# # Example 3: Country not found
-# print("\n--- Country Not Found Example ---")
-# non_existent = parser.get_data_by_country_and_range("Atlantis", "2020-01-01,2020-12-31")
-# # Example 4: Get all data
-# all_data = parser.get_all_data()
-# # Example 5: Get a list of all countries inside the dataset
-# all_countries = parser.get_country_list()
-# print("\n--- All Countries ---")
-# print(all_countries)
-# # Example 6: Get a (country, price) matrix for a specific time range (ready for CointegrationResidualGenerator)
-# price_matrix = parser.get_price_matrix("2021-05-10,2021-05-16", ["Germany", "France"])
-# print("\n--- Price Matrix ---")
-# print(price_matrix)
-# print(f"Shape: {price_matrix.shape}")
+        Returns:
+        - List[pd.Series]: A list of Series, where each Series contains the next-day return
+        for all countries corresponding to the last date of each rolling window.
+        """
+        # Calculate returns for the entire price matrix
+        returns = price_matrix.pct_change().dropna()
 
+        next_day_returns = []
+        for window in rolling_windows:
+            # Get the last date in the current rolling window
+            last_date = window.index[-1]
 
-# # Get list of countries
-# print("\n--- List of Countries ---")
-# countries = parser.get_country_list()
-# print(countries)
+            # Find the next day's return
+            if last_date in returns.index:
+                next_day_idx = returns.index.get_loc(last_date) + 1
+                if next_day_idx < len(returns):
+                    # Retrieve the return for the immediate next day
+                    next_day_return = returns.iloc[next_day_idx]
+                    next_day_returns.append(next_day_return)
+                else:
+                    # If no next day exists, append None
+                    next_day_returns.append(None)
+            else:
+                # If last_date is not in returns, append None
+                next_day_returns.append(None)
+
+        return next_day_returns
 
