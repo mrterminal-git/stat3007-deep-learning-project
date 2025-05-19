@@ -3,8 +3,10 @@ import torch.optim as optim
 import numpy as np
 import pandas as pd
 from models.CNN import *
-from models.ffn import *
+from models.Transformer import *
+from models.FFN import *
 from models.BacktestSharpeEvaluator import *
+from collections import deque
 
 class PortfolioOptimizer:
     """
@@ -12,7 +14,7 @@ class PortfolioOptimizer:
     generating weights to maximize the Sharpe ratio based on electricity price residuals.
     """
     def __init__(self, train_dataset: np.array, train_next_day_returns: pd.DataFrame, val_dataset: np.array, val_next_day_returns: pd.DataFrame, device=None, num_filters=8, filter_size=2, hidden_dim=32,
-                 lr=0.001, num_epochs=1000, batch_size=32):
+                 lr=0.001, num_epochs=1000, batch_size=32, num_heads=4, patience=None, use_transformer=True):
         """
         Initialize the portfolio optimizer with input data and hyperparameters.
 
@@ -51,6 +53,9 @@ class PortfolioOptimizer:
         self.lr = lr
         self.num_epochs = num_epochs
         self.batch_size = batch_size
+        self.num_heads = num_heads
+        self.patience = patience
+        self.use_transformer = use_transformer
 
         # Convert input data to PyTorch tensors
         self.cnn_input_tensor = torch.FloatTensor(train_dataset).to(self.device)
@@ -62,14 +67,23 @@ class PortfolioOptimizer:
 
         # Initialize models
         self.cnn_model = self._initialize_cnn()
+        if use_transformer: self.transformer_model = self._initialize_transformer()
         self.FFN_model = self._initialize_FFN()
 
         # Initialize optimizer
-        self.optimizer = optim.Adam(
-            list(self.cnn_model.parameters()) + list(self.FFN_model.parameters()),
-            lr=self.lr
-        )
-
+        if use_transformer:
+            self.optimizer = optim.Adam(
+                list(self.cnn_model.parameters()) + 
+                list(self.FFN_model.parameters()) +
+                list(self.transformer_model.parameters()),
+                lr=self.lr
+            )
+        else:
+            self.optimizer = optim.Adam(
+                list(self.cnn_model.parameters()) + 
+                list(self.FFN_model.parameters()),
+                lr=self.lr
+            )
         # Initialize evaluator for Sharpe ratio calculation
         self.evaluator = BacktestSharpeEvaluator()
 
@@ -81,17 +95,32 @@ class PortfolioOptimizer:
             CNN: Initialized CNN model on the specified device.
         """
         # Calculate output sizes after convolutions
-        L_after_conv1 = self.window_size - self.filter_size + 1  # e.g., 30 - 2 + 1 = 29
-        L_after_conv2 = L_after_conv1 - self.filter_size + 1    # e.g., 29 - 2 + 1 = 28
+        # for debugging
+        #L_after_conv1 = self.window_size - self.filter_size + 1  # e.g., 30 - 2 + 1 = 29
+        #L_after_conv2 = L_after_conv1 - self.filter_size + 1    # e.g., 29 - 2 + 1 = 28
 
         cnn = CNN(
             input_length=self.window_size,
             num_features=self.num_countries,
             num_filters=self.num_filters,
             num_classes=self.hidden_dim,  # Output matches FFN input dimension
-            filter_size=self.filter_size
+            filter_size=self.filter_size,
+            use_transformer=self.use_transformer
         ).to(self.device)
         return cnn
+    
+    def _initialize_transformer(self):
+        """
+        Initialize the Transformer.
+
+        Returns:
+            Transformer: Initialized Transformer on the specified device.
+        """
+        transformer = Transformer(
+            input_dim = self.num_filters, # D=8 (number of filters from the CNN)
+            num_heads = self.num_heads, # H = 4
+        ).to(self.device)
+        return transformer
 
     def _initialize_FFN(self):
         """
@@ -100,8 +129,12 @@ class PortfolioOptimizer:
         Returns:
             FFN: Initialized FFN model on the specified device.
         """
+        # Input dimensions to FFN changes depending on transformer or not
+        if self.use_transformer: ffn_input = self.num_filters
+        else: ffn_input = self.hidden_dim
+
         ffn = FFN(
-            input_dim=self.hidden_dim,
+            input_dim=ffn_input,
             hidden_dim=self.hidden_dim,
             output_dim=self.num_countries  # One weight per country
         ).to(self.device)
@@ -149,9 +182,13 @@ class PortfolioOptimizer:
             float: Final Sharpe ratio after training.
             list: Portfolio returns from the final evaluation.
         """
+        if self.patience:
+            eval_scores = deque(maxlen=self.patience) # Keep track of evaluation scores
+
         for epoch in range(self.num_epochs):
             # Set models to training mode
             self.cnn_model.train()
+            if self.use_transformer: self.transformer_model.train()
             self.FFN_model.train()
 
             # Process data in batches
@@ -165,10 +202,15 @@ class PortfolioOptimizer:
                 self.optimizer.zero_grad()
 
                 # Forward pass: CNN processes residuals
-                cnn_output = self.cnn_model(batch_inputs)  # Shape: [batch_size, hidden_dim]
+                cnn_output = self.cnn_model(batch_inputs)  # Shape: [batch_size, seq_len, num_filters]
 
-                # Forward pass: FFN generates weights
-                weights = self.FFN_model(cnn_output)  # Shape: [batch_size, num_countries]
+                if self.use_transformer: 
+                    transformer_output, attn_weights = self.transformer_model(cnn_output) # out: [batch_size, num_filters]
+
+                    # Forward pass: FFN generates weights
+                    weights = self.FFN_model(transformer_output)  # Shape: [batch_size, num_countries]
+                else: weights = self.FFN_model(cnn_output)
+                #print(transformer_output.shape)
 
                 # Normalize weights to sum to 1 (L1 norm)
                 normalized_weights = self.soft_normalize(weights)  # Shape: [batch_size, num_countries]
@@ -183,10 +225,17 @@ class PortfolioOptimizer:
                 loss.backward()
                 self.optimizer.step()
 
+            sharpe = self._evaluate_epoch()
+
+            if len(eval_scores) == self.patience and all(sharpe < x for x in eval_scores):
+                print(f"Early stopping triggered at epoch {epoch} with maximum validation score {max(eval_scores)}")
+                break
+            else: eval_scores.append(sharpe)
+
             if epoch % 10 == 0 and verbose:
                 # Evaluate Sharpe ratio for every 10th epoch
                 sharpe = self._evaluate_epoch()
-                print(f"Epoch {epoch}, Sharpe Ratio on Training set: {sharpe:.4f}")
+                print(f"Epoch {epoch}, Sharpe Ratio on Validation Set: {sharpe:.4f}")
 
         # Perform final evaluation
         final_sharpe, portfolio_returns = self.evaluate_final()
@@ -203,6 +252,7 @@ class PortfolioOptimizer:
         """
         self.evaluator.reset()
         self.cnn_model.eval()
+        if self.use_transformer: self.transformer_model.eval()
         self.FFN_model.eval()
 
         with torch.no_grad():
@@ -213,7 +263,13 @@ class PortfolioOptimizer:
 
                 # Forward pass
                 cnn_output = self.cnn_model(batch_inputs)
-                weights = self.FFN_model(cnn_output)
+                if self.use_transformer: 
+                    transformer_output, attn_weights = self.transformer_model(cnn_output) # out: [batch_size, num_filters]
+
+                    # Forward pass: FFN generates weights
+                    weights = self.FFN_model(transformer_output)  # Shape: [batch_size, num_countries]
+                else: weights = self.FFN_model(cnn_output)
+
                 normalized_weights = self.soft_normalize(weights)
 
                 # Compute portfolio returns
@@ -235,6 +291,7 @@ class PortfolioOptimizer:
         """
         self.evaluator.reset()
         self.cnn_model.eval()
+        if self.use_transformer: self.transformer_model.eval()
         self.FFN_model.eval()
 
         with torch.no_grad():
@@ -244,7 +301,13 @@ class PortfolioOptimizer:
 
                 # Forward pass
                 cnn_output = self.cnn_model(inputs)
-                weights = self.FFN_model(cnn_output)
+                if self.use_transformer: 
+                    transformer_output, attn_weights = self.transformer_model(cnn_output) # out: [batch_size, num_filters]
+
+                    # Forward pass: FFN generates weights
+                    weights = self.FFN_model(transformer_output)  # Shape: [batch_size, num_countries]
+                else: weights = self.FFN_model(cnn_output)
+                
                 normalized_weights = self.soft_normalize(weights)
 
                 # Compute portfolio return
@@ -266,6 +329,7 @@ class PortfolioOptimizer:
             tuple: (Sharpe ratio, list of portfolio returns).
         """
         self.cnn_model.eval()
+        self.transformer_model.eval()
         self.FFN_model.eval()
 
         # Convert test data to PyTorch tensors
@@ -280,7 +344,12 @@ class PortfolioOptimizer:
                 returns = test_next_day_returns_tensor[i:i+1]
                 # Forward pass
                 cnn_output = self.cnn_model(inputs)
-                weights = self.FFN_model(cnn_output)
+                if self.use_transformer: 
+                    transformer_output, attn_weights = self.transformer_model(cnn_output) # out: [batch_size, num_filters]
+
+                    # Forward pass: FFN generates weights
+                    weights = self.FFN_model(transformer_output)  # Shape: [batch_size, num_countries]
+                else: weights = self.FFN_model(cnn_output)
                 normalized_weights = self.soft_normalize(weights)
                 # Compute portfolio return
                 portfolio_return = torch.sum(normalized_weights * returns, dim=1).item()
