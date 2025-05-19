@@ -23,7 +23,7 @@ class FFN(nn.Module):
         Forward pass through the network.
         
         Args:
-            x (torch.Tensor): Input tensor of shape [batch_size, input_dim]
+            x (torch.Tensor): Input tensor of shape [batch_size, num_filters]
         
         Returns:
             torch.Tensor: Output tensor of shape [batch_size, output_dim]
