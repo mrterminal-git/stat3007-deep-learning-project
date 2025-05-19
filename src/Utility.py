@@ -1,6 +1,7 @@
 from models.CointegrationResidualGenerator import CointegrationResidualGenerator
 import pandas as pd
 
+
 class Utility:
     @staticmethod
     def process_training_data(
@@ -9,48 +10,67 @@ class Utility:
         cumulative_residual_window: int = 30
     ):
         """
-        Processes training data to generate CNN inputs and next-day returns.
-
-        Parameters:
-        - x_tr_data (list): List of rolling windows (price matrices).
-        - returns (pd.DataFrame): DataFrame of daily returns.
-        - cumulative_residual_window (int): Window size for cumulative residuals (default=30).
+        Processes training data to generate CNN inputs and next-day returns, preserving date indices.
 
         Returns:
-        - x_tr_data_cumulative_residuals (list): List of CNN input arrays.
-        - y_tr_data_next_day_returns (list): List of next-day returns arrays.
+        - x_tr_data_cumulative_residuals (list of pd.DataFrame): Each DataFrame is (countries, window), indexed by window dates.
+        - y_tr_data_next_day_returns (pd.DataFrame): (samples, countries), indexed by next-day date.
         """
-        x_tr_data_cumulative_residuals = []
-        y_tr_data_next_day_returns = []
+
+        all_cnn_inputs = []
+        all_next_day_returns = []
+        all_next_day_dates = []
 
         for current_price_matrix in x_tr_data:
-            # Create an instance of the CointegrationResidualGenerator
             residual_generator = CointegrationResidualGenerator(current_price_matrix)
-
-            # Compute residuals
-            residual_generator.compute_all_asset_residuals()
-
-            # Get residuals
+            # Skip if there is any thing wrong with the data
+            try:
+                residual_generator.compute_all_asset_residuals()
+            except ValueError as e:
+                print(f"Skipping due to error: {e}")
+                continue
             asset_residuals = residual_generator.get_asset_residuals()
 
-            # Prepare CNN input
             if len(asset_residuals) < cumulative_residual_window:
-                raise ValueError("The cumulative residual window size exceeds the available data.")
+                print("The cumulative residual window size exceeds the available data.")
+                continue
+        
             cnn_input = residual_generator.prepare_cnn_input_from_residuals(window=cumulative_residual_window)
+            # cnn_input shape: [samples, window, features]
+            # Transpose to [samples, features, window]
+            cnn_input_array = cnn_input.transpose(0, 2, 1)
 
-            # Reshape CNN input to match the expected shape
-            cnn_input_array = cnn_input.transpose(0, 2, 1)  # [samples, features, window]
+            for i in range(cnn_input_array.shape[0]):
+                # Get window dates for this sample
+                window_start = i
+                window_end = i + cumulative_residual_window
+                window_dates = asset_residuals.index[window_start:window_end]
+                window_end_date = window_dates[-1]
 
-            # Get the start index of the first 30-day cumulative residuals in the returns DataFrame
-            start_idx_in_returns = returns.index.get_loc(asset_residuals.index[0])
-            num_samples = len(asset_residuals) - cumulative_residual_window + 1
-            next_day_indices = [start_idx_in_returns + i + cumulative_residual_window for i in range(num_samples)]
+                # Find the next date in returns after window_end_date
+                try:
+                    next_day_loc = returns.index.get_loc(window_end_date) + 1
+                    if next_day_loc >= len(returns):
+                        continue
+                    next_day_date = returns.index[next_day_loc]
+                    next_day_return = returns.iloc[next_day_loc].values
+                except KeyError:
+                    continue
 
-            # Get the next-day returns for the corresponding indices
-            next_day_returns = returns.iloc[next_day_indices]
+                # Create DataFrame for this sample: (countries, window), columns=window_dates
+                sample_df = pd.DataFrame(
+                    cnn_input_array[i],
+                    index=returns.columns,  # countries
+                    columns=window_dates    # window dates
+                )
+                all_cnn_inputs.append(sample_df)
+                all_next_day_returns.append(next_day_return)
+                all_next_day_dates.append(next_day_date)
 
-            # Append the CNN input and next-day returns to their respective lists
-            x_tr_data_cumulative_residuals.append(cnn_input_array)
-            y_tr_data_next_day_returns.append(next_day_returns.values)
+        # y_tr_data_next_day_returns: (samples, countries), indexed by next-day date
+        y_tr_data_next_day_returns = pd.DataFrame(
+            all_next_day_returns, index=pd.Index(all_next_day_dates, name="date"), columns=returns.columns
+        )
 
-        return x_tr_data_cumulative_residuals, y_tr_data_next_day_returns
+        # x_tr_data_cumulative_residuals: list of DataFrames, each (countries, window_dates)
+        return all_cnn_inputs, y_tr_data_next_day_returns

@@ -3,7 +3,7 @@ import torch.optim as optim
 import numpy as np
 import pandas as pd
 from models.CNN import *
-from models.FFN import *
+from models.ffn import *
 from models.BacktestSharpeEvaluator import *
 
 class PortfolioOptimizer:
