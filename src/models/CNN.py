@@ -1,13 +1,14 @@
 import torch
 import torch.nn as nn
 class CNN(nn.Module):
-    def __init__(self, input_length, num_features, num_filters= 8, num_classes=2, filter_size=2, use_transformer=True):
+    def __init__(self, input_length, num_features, num_weather_features=0, num_filters= 8, num_classes=2, filter_size=2, use_transformer=True):
         """
         Initialize the CNN model based on the equations in the paper.
         
         Args:
             input_length (int): Length of the input sequence (L in the equations)
-            num_features (int): Number of features per time step
+            num_features (int): Number of features per time step (countries)
+            num_weather_features (int): Number of weather features per country
             num_classes (int): Number of output classes
             filter_size (int): Size of filter
             use_transformer (Boolean): If Transformer is used (to match dimensions)
@@ -15,14 +16,17 @@ class CNN(nn.Module):
         super(CNN, self).__init__()
 
         self.use_transformer = use_transformer
-        
+
+        # Total features = price features + weather features per country * num countries
+        self.total_features = num_features + num_weather_features * num_features
+
         self.num_filters = num_filters  # Number of filters (D = 8 according to equation)
         self.filter_size = filter_size  # Filter size (filter_size = 2 according to equation)
         
         # First convolutional layer (Equation 3)
         # Input shape: [batch_size, num_features, input_length]
         self.conv1 = nn.Conv1d(
-            in_channels=num_features,
+            in_channels=self.total_features,
             out_channels=self.num_filters,
             kernel_size=self.filter_size,
             stride=1,

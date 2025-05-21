@@ -1,8 +1,9 @@
 import pandas as pd
 from io import StringIO
 from typing import Optional, List
+import torch
 
-class DataLoader:
+class PriceDataLoader:
     """
     Parses European wholesale electricity price data, allowing filtering
     by country and date range.
@@ -139,13 +140,50 @@ class DataLoader:
         price_matrix = df.pivot(index="Date", columns="Country", values="Price").sort_index()
 
         # Handle missing data
-        if fill_method:
-            price_matrix = price_matrix.fillna(method=fill_method)
+        if fill_method == "ffill":
+            price_matrix = price_matrix.ffill()
+        elif fill_method == "bfill":
+            price_matrix = price_matrix.bfill()
         else:
             price_matrix = price_matrix.dropna()
 
         return price_matrix
     
+    def get_countries_with_complete_data(self, time_range: str) -> List[str]:
+        """
+        Returns a list of countries with complete (no NaN) price data for the specified time range.
+
+        Args:
+            time_range (str): Dateyou want to use format 'YYYY-MM-DD,YYYY-MM-DD'.
+
+        Returns:
+            List[str]: List of countries with complete data for the given time range.
+        """
+        if self.data is None:
+            print("Error: Data not loaded.")
+            return []
+
+        try:
+            start_date_str, end_date_str = time_range.split(',')
+            start_date = pd.to_datetime(start_date_str.strip())
+            end_date = pd.to_datetime(end_date_str.strip())
+        except ValueError:
+            print("Error: Invalid time_range format. Please use 'YYYY-MM-DD,YYYY-MM-DD'.")
+            return []
+
+        # Calculate expected number of days
+        expected_days = (end_date - start_date).days + 1
+
+        # Filter data for the time range
+        df = self.data[
+            (self.data['Date'] >= start_date) & (self.data['Date'] <= end_date)
+        ]
+
+        # Group by country and count non-NaN prices
+        country_counts = df.groupby('Country')['Price'].count()
+        # Select countries with complete data (count equals expected days)
+        complete_countries = country_counts[country_counts == expected_days].index.tolist()
+        return complete_countries
 
     def get_price_matrix_rolling_window(
         self,
@@ -154,87 +192,66 @@ class DataLoader:
         time_range: str,
         countries: List[str],
         fill_method: Optional[str] = None
-    ) -> List[pd.DataFrame]:
+    ) -> torch.Tensor:
         """
-        Returns a set of price matrices where:
-        - Rows = dates
-        - Columns = countries
-        - Values = daily electricity prices
+        Returns a tensor of price matrices for rolling windows.
+        Shape: [num_samples, window_size, num_countries]
 
         Parameters:
-        - one_window_days (int): number of days in one window
-        - window_stride_days (int): number of days to stride the window
-        - time_range (str): e.g. "2021-05-10,2021-05-16"
-        - countries (List[str]): list of country names to include
+        - one_window_days (int): Number of days in one window
+        - window_stride_days (int): Number of days to stride the window
+        - time_range (str): e.g., "2021-01-01,2021-12-31"
+        - countries (List[str]): List of country names to include
         - fill_method (Optional[str]): 'ffill', 'bfill', or None
 
         Returns:
-        - List[pd.DataFrame]: A list of price matrices, each representing a rolling window.
+        - torch.Tensor: Shape [num_samples, window_size, num_countries]
         """
-        start_date, end_date = time_range.split(",")
+        price_matrix = self.get_price_matrix(time_range, countries, fill_method)
+        num_samples = (len(price_matrix) - one_window_days) // window_stride_days + 1
+        price_tensor = torch.zeros((num_samples, one_window_days, len(countries)), dtype=torch.float32)
 
-        # Filter the master data once
-        df = self.data.copy()
-        df = df[df["Country"].isin(countries)]
-        df = df[(df["Date"] >= start_date) & (df["Date"] <= end_date)]
-
-        # Pivot: index=date, columns=country, values=price
-        price_matrix = df.pivot(index="Date", columns="Country", values="Price").sort_index()
-
-        # Handle missing data
-        if fill_method:
-            price_matrix = price_matrix.fillna(method=fill_method)
-        else:
-            price_matrix = price_matrix.dropna()
-
-        # Generate rolling windows
-        rolling_windows = []
-        for start_idx in range(0, len(price_matrix) - one_window_days + 1, window_stride_days):
-            end_idx = start_idx + one_window_days
-            if end_idx > len(price_matrix):  # Ensure we don't go past the date range
+        for i in range(0, len(price_matrix) - one_window_days + 1, window_stride_days):
+            sample_idx = i // window_stride_days
+            if sample_idx >= num_samples:
                 break
-            rolling_window = price_matrix.iloc[start_idx:end_idx]
-            rolling_windows.append(rolling_window)
+            window = price_matrix.iloc[i:i + one_window_days]
+            price_tensor[sample_idx] = torch.tensor(window.values, dtype=torch.float32)
 
-        return rolling_windows
-    
+        return price_tensor
+
     def get_next_day_returns(
         self,
-        rolling_windows: List[pd.DataFrame],
-        price_matrix: pd.DataFrame
-    ) -> List[pd.Series]:
+        rolling_windows: torch.Tensor,
+        price_matrix: pd.DataFrame,
+        one_window_days: int,
+        window_stride_days: int
+    ) -> torch.Tensor:
         """
-        Finds the next-day return for the last day in each rolling window.
+        Returns a tensor of next-day returns for each rolling window.
+        Shape: [num_samples, num_countries]
 
         Parameters:
-        - rolling_windows (List[pd.DataFrame]): A list of price matrices, each representing a rolling window.
-        - price_matrix (pd.DataFrame): A DataFrame of daily prices (index=date, columns=country names).
+        - rolling_windows (torch.Tensor): Tensor of price matrices, shape [num_samples, window_size, num_countries]
+        - price_matrix (pd.DataFrame): DataFrame of daily prices (index=date, columns=country names)
+        - one_window_days (int): Number of days in one window
+        - window_stride_days (int): Number of days to stride the window
 
         Returns:
-        - List[pd.Series]: A list of Series, where each Series contains the next-day return
-        for all countries corresponding to the last date of each rolling window.
+        - torch.Tensor: Shape [num_samples, num_countries]
         """
-        # Calculate returns for the entire price matrix
         returns = price_matrix.pct_change().dropna()
+        next_day_returns = torch.zeros((rolling_windows.shape[0], rolling_windows.shape[2]), dtype=torch.float32)
 
-        next_day_returns = []
-        for window in rolling_windows:
-            # Get the last date in the current rolling window
-            last_date = window.index[-1]
-
-            # Find the next day's return
+        for i in range(rolling_windows.shape[0]):
+            last_date = price_matrix.index[i * 1 + one_window_days - window_stride_days]  # Assuming stride=1
             if last_date in returns.index:
                 next_day_idx = returns.index.get_loc(last_date) + 1
                 if next_day_idx < len(returns):
-                    # Retrieve the return for the immediate next day
-                    next_day_return = returns.iloc[next_day_idx]
-                    next_day_returns.append(next_day_return)
+                    next_day_returns[i] = torch.tensor(returns.iloc[next_day_idx].values, dtype=torch.float32)
                 else:
-                    # If no next day exists, append None
-                    next_day_returns.append(None)
+                    next_day_returns[i] = torch.zeros(rolling_windows.shape[2], dtype=torch.float32)
             else:
-                # If last_date is not in returns, append None
-                next_day_returns.append(None)
+                next_day_returns[i] = torch.zeros(rolling_windows.shape[2], dtype=torch.float32)
 
         return next_day_returns
-
