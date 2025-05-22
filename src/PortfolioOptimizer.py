@@ -96,17 +96,22 @@ class PortfolioOptimizer:
 
     def soft_normalize(self, weights: torch.Tensor) -> torch.Tensor:
         """
-        Normalize portfolio weights using L1 norm (sum of absolute values = 1).
+        Softly normalize portfolio weights to be approximately in [-1, 1] and sum to 1.
 
         Args:
-            weights (torch.Tensor): Raw weights with shape [batch_size, num_countries].
+            weights (torch.Tensor): Raw weights of shape [batch_size, num_assets].
 
         Returns:
-            torch.Tensor: Normalized weights with shape [batch_size, num_countries].
+            torch.Tensor: Soft-normalized weights of shape [batch_size, num_assets].
         """
-        # Compute L1 norm (sum of absolute values) with a small epsilon to avoid division by zero
-        l1_norm = torch.sum(torch.abs(weights), dim=1, keepdim=True) + 1e-8
-        return weights / l1_norm
+        # Squash to (-1, 1)
+        squashed = torch.tanh(weights)
+
+        # Normalize so the sum is 1 (signed sum, not absolute)
+        sum_weights = torch.sum(squashed, dim=1, keepdim=True) + 1e-8
+        normalized = squashed / sum_weights
+
+        return normalized
 
     def forward(self, inputs: torch.Tensor) -> torch.Tensor:
         """
