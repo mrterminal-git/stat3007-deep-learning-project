@@ -61,6 +61,10 @@ class DataPreparation:
         for i in range(0, len(price_data) - window_size + 1, stride):
             # Extract price residuals for the current window and compute cumulative sum
             price_window = price_data.iloc[i:i+window_size].cumsum()
+
+            # Normalize residuals per asset (column) within this window
+            price_window = (price_window - price_window.mean()) / (price_window.std() + 1e-8)
+
             # Extract weather data for the same window
             weather_window = weather_data.iloc[i:i+window_size]
             window_features = [price_window.values]  # Start with price residuals
