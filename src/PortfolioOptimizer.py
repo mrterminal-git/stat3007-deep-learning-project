@@ -94,6 +94,30 @@ class PortfolioOptimizer:
             output_dim=self.num_countries
         ).to(self.device)
 
+    def _compute_weights(self, x: torch.Tensor, training: bool) -> torch.Tensor:
+        """
+        Compute portfolio weights from input data using CNN, optional Transformer, and FFN.
+        
+        Args:
+            x (torch.Tensor): Input tensor of shape [batch_size, num_features, window_size].
+            training (bool): Whether the model is in training mode (affects normalization).
+
+        Returns:
+            torch.Tensor: Computed portfolio weights of shape [batch_size, num_countries].
+        """
+
+        x = self.cnn_model(x)
+        if self.use_transformer:
+            x = self.transformer_model(x)
+            if isinstance(x, tuple):
+                x = x[0]  # Extract the output tensor
+        weights = self.ffn_model(x)
+        # normalize with tanh + softmax or L1
+        if not training:
+            weights = torch.tanh(weights)
+            weights = weights / (torch.sum(torch.abs(weights), dim=1, keepdim=True) + 1e-8)
+        return weights
+
     def soft_normalize(self, weights: torch.Tensor) -> torch.Tensor:
         """
         Softly normalize portfolio weights to be approximately in [-1, 1] and sum to 1.
@@ -113,53 +137,26 @@ class PortfolioOptimizer:
 
         return normalized
 
-    def forward(self, inputs: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
-        Perform a forward pass through the model for training, retaining gradients.
-
+        Forward pass to compute portfolio weights during training.
+        
         Args:
-            inputs (torch.Tensor): Input data with shape [batch_size, num_features, window_size].
+            x (torch.Tensor): Input tensor of shape [batch_size, num_features, window_size].
 
         Returns:
-            torch.Tensor: Normalized portfolio weights with shape [batch_size, num_countries].
+            torch.Tensor: Computed portfolio weights of shape [batch_size, num_countries].
         """
-        # Pass input through CNN
-        cnn_output = self.cnn_model(inputs)
-        # Pass through Transformer if enabled
-        if self.use_transformer:
-            transformer_output, _ = self.transformer_model(cnn_output)
-            weights = self.ffn_model(transformer_output)
-        else:
-            weights = self.ffn_model(cnn_output)
-        # Normalize weights
-        return self.soft_normalize(weights)
+        return self._compute_weights(x, training=True)
 
-    def infer(self, inputs: torch.Tensor) -> torch.Tensor:
-        """
-        Perform a forward pass for inference (no gradients, evaluation mode).
-
-        Args:
-            inputs (torch.Tensor): Input data with shape [batch_size, num_features, window_size].
-
-        Returns:
-            torch.Tensor: Normalized portfolio weights with shape [batch_size, num_countries].
-        """
-        # Set models to evaluation mode
+    def infer(self, x: torch.Tensor) -> torch.Tensor:
         self.cnn_model.eval()
+        self.ffn_model.eval()
         if self.use_transformer:
             self.transformer_model.eval()
-        self.ffn_model.eval()
-
-        # Disable gradient computation for inference
         with torch.no_grad():
-            cnn_output = self.cnn_model(inputs)
-            if self.use_transformer:
-                transformer_output, _ = self.transformer_model(cnn_output)
-                weights = self.ffn_model(transformer_output)
-            else:
-                weights = self.ffn_model(cnn_output)
-        return self.soft_normalize(weights)
-
+            return self._compute_weights(x, training=False)
+    
     def get_parameters(self) -> List[torch.nn.Parameter]:
         """
         Get all model parameters for optimization.
