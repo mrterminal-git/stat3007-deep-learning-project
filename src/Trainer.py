@@ -157,11 +157,12 @@ class Trainer:
             # Train for one epoch
             self.train_epoch()
             # Evaluate on validation set
+            train_sharpe = self.evaluate(self.train_data, self.train_returns)
             val_sharpe = self.evaluate(self.val_data, self.val_returns)
 
             # Print progress if verbose
-            if verbose and epoch % 10 == 0:
-                print(f"Epoch {epoch}, Validation Sharpe: {val_sharpe:.4f}")
+            if verbose:
+                print(f"Epoch {epoch:3d} | Train Sharpe: {train_sharpe:.4f} | Val Sharpe: {val_sharpe:.4f}")
 
             # Update best Sharpe and check for early stopping
             if val_sharpe > best_sharpe:
