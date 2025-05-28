@@ -3,6 +3,7 @@ from PortfolioOptimizer import PortfolioOptimizer
 from typing import Optional, Tuple, List, Dict
 import torch.optim as optim
 from models.BacktestSharpeEvaluator import BacktestSharpeEvaluator
+import matplotlib.pyplot as plt
 
 class Trainer:
     """
@@ -20,7 +21,8 @@ class Trainer:
         num_epochs: int = 100,
         batch_size: int = 32,
         patience: Optional[int] = None,
-        device: torch.device = None
+        device: torch.device = None,
+        loss_fn: str = "sharpe"
     ):
         """
         Initialize the Trainer with the model and data.
@@ -36,6 +38,7 @@ class Trainer:
             batch_size (int): Batch size for training (default: 32).
             patience (int, optional): Number of epochs to wait for improvement before early stopping (default: None).
             device (torch.device, optional): Device for computation; defaults to optimizer's device if None.
+            loss_fn (str): Loss function to use. Can be either "sharpe", "mean-variance", "sortino" or "regularized-sharpe"
         """
         self.optimizer = optimizer  # Store PortfolioOptimizer instance
         self.train_data = train_data  # Store training input data
@@ -48,8 +51,13 @@ class Trainer:
         self.patience = patience  # Store early stopping patience
         self.device = device or optimizer.device  # Use optimizer's device if none specified
         self.evaluator = BacktestSharpeEvaluator()  # Initialize Sharpe ratio evaluator
+        self.loss_fn = loss_fn
         # Initialize Adam optimizer with model parameters
         self.torch_optimizer = optim.Adam(self.optimizer.get_parameters(), lr=self.lr)
+        self.scheduler = optim.lr_scheduler.ReduceLROnPlateau(self.torch_optimizer, mode='max', factor=0.5, patience=10)
+        # Lists to store metrics
+        self.train_losses = []  # Store average loss per epoch
+        self.val_sharpes = []   # Store validation Sharpe ratio per epoch
 
     def sharpe_ratio_loss(self, returns: torch.Tensor, risk_free_rate: float = 0.0) -> torch.Tensor:
         """
@@ -71,6 +79,28 @@ class Trainer:
         sharpe_ratio = mean_excess / std_excess
         # Return negative Sharpe ratio as loss (to maximize Sharpe ratio)
         return -sharpe_ratio
+    
+    def mean_variance_loss(self, returns: torch.Tensor, risk_free_rate: float = 0.0, lambda_reg: float = 1.0) -> torch.Tensor:
+        excess_returns = returns - risk_free_rate
+        mean_return = torch.mean(excess_returns)
+        variance = torch.var(excess_returns, unbiased=False)
+        return -mean_return + lambda_reg * variance
+    
+    def sortino_ratio_loss(self, returns: torch.Tensor, risk_free_rate: float = 0.0) -> torch.Tensor:
+        excess_returns = returns - risk_free_rate
+        mean_excess = torch.mean(excess_returns)
+        downside_returns = torch.where(excess_returns < 0, excess_returns, torch.zeros_like(excess_returns))
+        downside_std = torch.sqrt(torch.mean(downside_returns ** 2)) + 1e-5
+        sortino_ratio = mean_excess / downside_std
+        return -sortino_ratio
+    
+    def regularized_sharpe_loss(self, returns: torch.Tensor, weights: torch.Tensor, risk_free_rate: float = 0.0, gamma: float = 0.01) -> torch.Tensor:
+        excess_returns = returns - risk_free_rate
+        mean_excess = torch.mean(excess_returns)
+        std_excess = torch.std(excess_returns, unbiased=False) + 1e-5
+        sharpe_ratio = mean_excess / std_excess
+        reg_term = gamma * torch.norm(weights, p=2) ** 2
+        return -sharpe_ratio + reg_term
 
     def train_epoch(self) -> None:
         """
@@ -82,6 +112,7 @@ class Trainer:
             self.optimizer.transformer_model.train()
         self.optimizer.ffn_model.train()
 
+        epoch_losses = []
         # Iterate over batches of training data
         for batch_idx in range(0, len(self.train_data), self.batch_size):
             # Extract batch
@@ -96,11 +127,22 @@ class Trainer:
             # Compute portfolio returns as weighted sum of asset returns
             portfolio_returns = torch.sum(weights * batch_returns, dim=1)
             # Calculate loss (negative Sharpe ratio)
-            loss = self.sharpe_ratio_loss(portfolio_returns)
+            if self.loss_fn == "sharpe":
+                loss = self.sharpe_ratio_loss(portfolio_returns)
+            elif self.loss_fn == "mean-variance":
+                loss = self.mean_variance_loss(portfolio_returns)
+            elif self.loss_fn == "sortino":
+                loss = self.sortino_ratio_loss(portfolio_returns)
+            elif self.loss_fn == "regularized-sharpe":
+                loss = self.regularized_sharpe_loss(portfolio_returns, weights)
             # Backpropagate gradients
             loss.backward()
             # Update model parameters
             self.torch_optimizer.step()
+            epoch_losses.append(loss.item())
+
+        # Return average loss for the epoch
+        return sum(epoch_losses) / len(epoch_losses) if epoch_losses else float('inf')
 
     def evaluate(self, data: torch.Tensor, returns: torch.Tensor) -> float:
         """
@@ -148,22 +190,25 @@ class Trainer:
         Returns:
             Tuple[float, List[float]]: Best validation Sharpe ratio and corresponding portfolio returns.
         """
-        best_sharpe = float('-inf')  # Track best Sharpe ratio
-        best_returns = []  # Store portfolio returns for best Sharpe
-        patience_counter = 0  # Counter for early stopping
+        best_sharpe = float('-inf')
+        best_returns = []
+        patience_counter = 0
 
-        # Train for specified number of epochs
         for epoch in range(self.num_epochs):
-            # Train for one epoch
-            self.train_epoch()
+            # Train and get average loss
+            avg_loss = self.train_epoch()
+            self.train_losses.append(avg_loss)
+
             # Evaluate on validation set
             val_sharpe = self.evaluate(self.val_data, self.val_returns)
+            self.val_sharpes.append(val_sharpe)
 
-            # Print progress if verbose
+            # Step the scheduler based on validation Sharpe ratio
+            self.scheduler.step(val_sharpe)
+
             if verbose and epoch % 10 == 0:
-                print(f"Epoch {epoch}, Validation Sharpe: {val_sharpe:.4f}")
+                print(f"Epoch {epoch}, Avg Train Loss: {avg_loss:.4f}, Validation Sharpe: {val_sharpe:.4f}")
 
-            # Update best Sharpe and check for early stopping
             if val_sharpe > best_sharpe:
                 best_sharpe = val_sharpe
                 best_returns = self.evaluator.portfolio_returns.copy()
@@ -247,3 +292,26 @@ class Trainer:
         # Evaluate on test data using the same method as validation
         sharpe = self.evaluate(test_data, test_returns)
         return sharpe, self.evaluator.portfolio_returns
+    
+    def plot_metrics(self):
+        """Plot training loss and validation Sharpe ratio."""
+        fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 8))
+
+        # Plot training loss
+        ax1.plot(self.train_losses, label='Training Loss (-Sharpe)', color='red')
+        ax1.set_title('Training Loss Over Epochs')
+        ax1.set_xlabel('Epoch')
+        ax1.set_ylabel('Negative Sharpe Ratio')
+        ax1.legend()
+        ax1.grid(True)
+
+        # Plot validation Sharpe ratio
+        ax2.plot(self.val_sharpes, label='Validation Sharpe Ratio', color='blue')
+        ax2.set_title('Validation Sharpe Ratio Over Epochs')
+        ax2.set_xlabel('Epoch')
+        ax2.set_ylabel('Sharpe Ratio')
+        ax2.legend()
+        ax2.grid(True)
+
+        plt.tight_layout()
+        plt.show()

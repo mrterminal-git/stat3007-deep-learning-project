@@ -166,6 +166,61 @@ class WeatherDataLoader:
             weather_matrix = weather_matrix.dropna()
 
         return weather_matrix
+    
+    def get_countries_with_complete_data(self, time_range: str, features: Optional[List[str]] = None) -> List[str]:
+        """
+        Returns a list of countries with complete (no NaN) weather data for the specified time range
+        across all specified features.
+
+        Args:
+            time_range (str): Date range in format 'YYYY-MM-DD,YYYY-MM-DD'.
+            features (List[str], optional): List of weather features to check for completeness.
+                If None, include all numerical columns except 'Date' and 'country'.
+
+        Returns:
+            List[str]: List of countries with complete data for the given time range and features.
+        """
+        if self.data is None:
+            print("Error: Weather data not loaded.")
+            return []
+
+        try:
+            start_date_str, end_date_str = time_range.split(',')
+            start_date = pd.to_datetime(start_date_str.strip())
+            end_date = pd.to_datetime(end_date_str.strip())
+        except ValueError:
+            print("Error: Invalid time_range format. Please use 'YYYY-MM-DD,YYYY-MM-DD'.")
+            return []
+
+        # Calculate expected number of days
+        expected_days = (end_date - start_date).days + 1
+
+        # Filter data for the time range
+        df = self.data[
+            (self.data['Date'] >= start_date) & (self.data['Date'] <= end_date)
+        ]
+
+        # Select features (default to all numerical columns except 'Date' and 'country')
+        if features is None:
+            features = [col for col in df.columns if col not in ['Date', 'country'] and df[col].dtype in ['float64', 'int64']]
+
+        # Check for completeness for each country and feature
+        complete_countries = []
+        for country in df['country'].unique():
+            country_data = df[df['country'] == country]
+            # Ensure the country has data for the expected number of days
+            if len(country_data) != expected_days:
+                continue
+            # Check that all features have no NaN values
+            all_features_complete = True
+            for feature in features:
+                if country_data[feature].isna().any():
+                    all_features_complete = False
+                    break
+            if all_features_complete:
+                complete_countries.append(country)
+
+        return complete_countries
 
     def get_weather_matrix_rolling_window(
         self,
